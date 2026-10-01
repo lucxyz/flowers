@@ -293,6 +293,22 @@ both sides of a fuzzy comparison only (the built-in regexes use those words lite
 ("show me the battery LEVEL") still lower the score. Anything unsure falls through to Claude as before. Tune the two constants
 if it misfires; the daemon needs a restart to pick up the change.
 
+**"Launch X on workspace N"** is a built-in pattern (any app `_app_argv` can resolve, N 1-10): it focuses workspace N, then
+starts the app. It used to be saved as one auto-promoted script per number; that entry was removed.
+
+**Embedding (paraphrase) matching of promoted phrases** (`_embed_user_command`, `src/phonon_embed.py`). The last tier,
+after difflib: nearest neighbour by cosine over all-MiniLM-L6-v2 sentence embeddings of the saved phrases ("grab a
+screenshot of the screen" -> "take a screenshot"; ~35 ms per query on this CPU, saved-phrase vectors cached until the list
+changes). The model is a numpy forward pass over `embed-model/` (safetensors + `tokenizers`; no torch, no new pip
+dependency; verified equal to the torch reference to 1e-7; setup.sh downloads the 90 MB, `PHONON_EMBED_DIR` overrides
+the path). `EMBED_MIN` 0.75 and `EMBED_MARGIN` 0.15 (winner vs EVERY other phrase) were picked from real saved phrases:
+paraphrases scored 0.75-0.88, "open spotify" vs "start spotify on workspace 3" 0.70 and "what time is it" vs "show uptime"
+0.49 (both must miss). Embeddings put opposites and different numbers close together (workspace 4 vs 3 scores 0.93), so
+there are guards: identical numbers, same side of each antonym pair (`_OPPOSITES`: up/down, louder/quieter, on-off ...) and
+negation words, and a saved pair that differs only in polarity is never embed-matched (margin). There is deliberately no
+shadow mode: if it misfires, tune the constants or add the missing wording as an alias. A missing `embed-model/` just
+turns the tier off. The daemon loads the model in a thread at startup; it needs a restart to pick all of this up.
+
 **Voice Claude model and "existing" check.** The fallback session runs `PHONON_VOICE_MODEL` (default `sonnet`; it was
 haiku, which got exact CLI syntax wrong, e.g. `wpctl ... +20%`). It is sent the list of existing commands (saved phrases +
 `BUILTIN_HELP`, which must be kept in sync with `match()`) at session start and whenever the saved list changes. If a
