@@ -13,11 +13,26 @@ mic ── pw-record (16 kHz mono s16) ──► Capture ── 30 ms frames, RM
                                           ▼
                        mode at the moment of the cut decides what a phrase means:
    dictating ► typing helper ("new line"…) or wtype the text            listening ► ignore unless it starts with
-                                                                         "computer": phrase table → user-commands.json
+                                                                         "computer": match() tiers (below)
    Hyprland keybinds ─► phonon-ctl.py ─► unix socket ─► daemon           → Claude session → (spoken confirm) → run
    run() ─► result: file → viewer on special workspace │ short text → notification │ none → "Done"
    daemon writes 0/1/2 to $XDG_RUNTIME_DIR/phonon-recording ─► status-bar indicator
 ```
+
+**`match()` (phonon_commands.py) tries these tiers in order and stops at the first hit; a miss goes to the Claude session.**
+Each tier is stricter about what it will guess, because a wrong match runs a command while a miss only costs a Claude call:
+
+| # | Tier | Covers | Detail |
+|---|------|--------|--------|
+| 1 | Built-in phrases and regexes | confirm/cancel, modes, workspace N, move window, volume, brightness, media, lock, panels, research, "launch X on workspace N" | exact, instant, no learning (§6) |
+| 2 | Saved phrases + learned aliases | `user-commands.json` (hand-saved and auto-promoted) | exact, after `strip_polite` |
+| 3 | App launcher | "open X": alias table, then a `.desktop` name | `_app_argv` |
+| 4 | Fuzzy | typos, word order, filler words vs saved phrases | difflib, §6 |
+| 5 | Embedding nearest neighbour | paraphrases of saved phrases | MiniLM in numpy, §6; skipped if `embed-model/` is missing |
+
+Tiers 4 and 5 only look at saved phrases, never at the built-ins, and share the same guards: identical numbers, no regex or
+blocked entries, a clear winner over the runner-up. Tier 5 adds the antonym/negation check. Unmatched requests reach the
+Claude fallback (§5), and what it produces is promoted into tier 2 (§6), so the loop feeds itself.
 
 One continuous capture serves both modes; listening and dictation can be on together (dictation wins while on).
 Everything is one Python process plus the `pw-record` child; there is no systemd unit (the author autostarts it from
@@ -387,6 +402,6 @@ Claude. `suggested-commands.jsonl` persists the commands you spoke and what they
 Rolling partial results with backspace correction (more "live", fragile in arbitrary apps) · joining phrases into
 sentences (capitalisation/period) · echo cancellation or media-aware ducking for the wake word · a real wake-word model
 instead of "transcribe everything" · HTML reports rendered instead of shown as source · a PDF fallback via `pdftoppm` +
-`icat` while no zathura plugin exists · porting the Hyprland strings behind a small adapter · automated tests.
+`icat` while no zathura plugin exists · porting the Hyprland strings behind a small adapter · automated tests · an adversarial test set for the embedding tier (the thresholds were tuned on four saved phrases; revisit once there are many).
 
 
