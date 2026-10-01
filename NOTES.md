@@ -139,7 +139,7 @@ residue; blips under 0.25 s are dropped anyway). Noise suppression and gain cont
 
 ## 5. The Claude fallback
 
-- One long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --model haiku --tools ""`
+- One long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --model sonnet --tools ""` (`PHONON_VOICE_MODEL`; see section 6)
   process. **Cold start ≈ 10 s, follow-ups 1–2 s**, and it remembers context ("a bit more"). It is pre-warmed when
   listening is turned on, and recycled after 40 turns / 30 min idle / any error or hang (60 s).
 - **Typed access:** `src/phonon-chat.py` talks to the same process through the daemon's socket (`chat`, `chat-run`,
@@ -265,6 +265,12 @@ delegating a web question (and not delegating "open the terminal" or arithmetic)
 its allowed command with no permission prompt, receiving the "report ready" message, reading the report and answering correctly.
 Not verified: many concurrent jobs, jobs that fail mid-way, very long reports.
 
+**Work-mode folders.** Besides `work/` (its cwd), the work session is started with `--add-dir` for `~/Documents`, `~/Code` and
+`~/Downloads` (only those that exist; override with `PHONON_WORK_DIRS="a:b:c"`), so it can read and edit there, and
+`acceptEdits` auto-accepts those edits like in `work/`. Reading all of `~` was already allowed (minus credentials/browser
+profiles). Unchanged: `rm`, `sudo`, `curl`, `git push` etc. stay denied, other Bash commands still ask. Takes effect the
+next time work mode starts (the session's launch flags are fixed at start).
+
 ## 6. Learning loop (auto-promotion)
 
 Claude's answer carries `repeatable` + a generic `phrase`; repeatable ones are logged to `suggested-commands.jsonl`
@@ -275,6 +281,40 @@ needed confirmation or matches `RISKY`/`BLOCKED`; never a phrase that already ex
 ≤ 6 words; ≤ 3 per day (`AUTO_PER_DAY`). Scripts are plain bash: edit them, or `phonon-suggestions.py remove "<phrase>"`.
 Caveat: saved commands keep whatever `show` mode they had at the time; ones saved before `show` existed default to
 `text` (our "take a screenshot" had to be re-saved to produce a file).
+
+**Fuzzy matching of promoted phrases** (`_fuzzy_user_command`, stdlib `difflib`, no new dependency). After every exact
+rule (built-ins, exact saved phrases, app launcher) has failed, a heard phrase is compared with the saved phrases:
+similarity >= `FUZZY_MIN` (0.84; best of character ratio and word-order-insensitive ratio), the winner must beat the
+runner-up by `FUZZY_MARGIN` (0.06), numbers must be identical ("workspace 3" never matches "workspace 4"), regex entries
+and phrases under 6 characters are skipped. Two word-cleaning steps: `strip_polite` removes politeness at the edges of every request before any matching
+("could you please …", "… please/thanks/for me"; kept if nothing would remain, so "thank you" is still its own
+built-in and "yes please" is "yes"); `fuzzy_key` drops filler words (`_FILLER`: the a an me my to of some just) from
+both sides of a fuzzy comparison only (the built-in regexes use those words literally). Meaningful extra words
+("show me the battery LEVEL") still lower the score. Anything unsure falls through to Claude as before. Tune the two constants
+if it misfires; the daemon needs a restart to pick up the change.
+
+**Voice Claude model and "existing" check.** The fallback session runs `PHONON_VOICE_MODEL` (default `sonnet`; it was
+haiku, which got exact CLI syntax wrong, e.g. `wpctl ... +20%`). It is sent the list of existing commands (saved phrases +
+`BUILTIN_HELP`, which must be kept in sync with `match()`) at session start and whenever the saved list changes. If a
+request just means one of them, it replies `"existing": "<phrase>"` with empty `shell`; `_existing_action` runs that
+command and teaches the wording: for a saved phrase the heard text is added to its `aliases`, for a built-in a
+`{"phrase": heard, "builtin": existing}` entry is saved in `user-commands.json`. Every such case is logged to
+`suggested-commands.jsonl` with `"status": "missed"` (heard + existing + kind): these are the regexes/phrase tables worth
+fixing in code. Cap `ALIAS_PER_DAY` (10); dictate/work/research/stop-listening are never aliased.
+
+## 6b. Conversation mode
+
+"computer, conversation mode" / "let's talk" (ctl `conversation`, `conversation-on|off`) starts it; "end conversation" (or
+the idle timeout) ends it. While on: (1) a phrase ends after `CONV_PAUSE_S` (1.6 s, env `PHONON_CONV_PAUSE_S`) of
+silence instead of 0.7 s, so thinking pauses do not split a sentence (dictation keeps 0.7 s); (2) the wake word is
+optional, every phrase is treated as a command; the same routing applies (built-ins, saved phrases, then the work session
+if work mode is on, else the Claude fallback). A single loose word that matches nothing is ignored (noise/misheard
+fragments). It is opt-in each time: never remembered across restarts, ends after `CONV_IDLE_S` (600 s) without a phrase
+and whenever listening goes off, and turning it on turns listening on. "stop" still only ends the current exchange.
+Caveat: with no wake word, speech meant for someone else, or a video, will be taken as commands (the echo canceller
+only removes our own playback), so use it for focused sessions; "end conversation" is the exit. Combine with work mode
+for hands-free coding. Tested: routing in `heard()` with stubs (wake-word on/off, loose word, free text, end phrase,
+listening off); not tested with real speech. Bar: flag `4` = conversation (accent bullseye: ring with a centre dot), `5` = conversation + work (bullseye left of the green diamond).
 
 ## 7. Showing results
 
