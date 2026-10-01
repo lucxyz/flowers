@@ -25,28 +25,35 @@ Hyprland's `hyprland.start`).
 
 ## 2. The speech model
 
-- **Phonon-2** ships as `phonon-2.bps.tar.zst` containing `model.fermion`, a packed container (five-value + int6
-  quantisation, ~2 bits per encoder weight). The README suggests a "Fermion runtime", but the repo's own
-  `reference_transformers.py` shows the weights simply **expand losslessly to fp32 and load into stock Hugging Face
-  `ParakeetForTDT`** (`load_state_dict`, strict). We reimplemented that (`vendor/fermion_container.py` +
-  `_model_from_container`). Only the Apple-silicon mic CLI of the upstream package is platform-limited; the weights are not.
-- **Startup cost.** Unpacking in pure Python plus random init took ~30 s. We save the expanded model once with
-  `save_pretrained` (fp32 safetensors, 2.5 GB, `hf/`) and later load it with `from_pretrained` (memory-mapped):
-  0.3 s for the weights, **~5 s for the whole daemon** (mostly importing torch/transformers). The cache is rebuilt if
-  `model.fermion` is newer. Verified: transcripts are word-for-word identical before and after the cache.
-- **Do not build the model on the `meta` device.** `load_state_dict(..., assign=True)` works, but the model's
-  non-persistent buffers (positional tables) are not in the checkpoint and stay on meta → "cannot copy out of meta
-  tensor". Build on CPU, then assign.
-- **Memory:** ~3 GB resident (fp32 weights). Building the model naively held ~6.8 GB (random init + state dict + raw
-  tensors); `assign=True`, deleting the raw tensors and `malloc_trim` fixed that.
-- **Speed (stock PyTorch fp32, 4 threads):** a 62 s continuous clip decoded in 8.9 s (~7x realtime); typical phrases of
-  3–10 s decode in 0.4–1.2 s. Fermion's quoted 143x needs their optimised runtime; we did not need it. Their quoted
-  5.21 % average WER on English leaderboards is *their* number; we only spot-checked (a 60 s read-aloud passage of dense
-  philosophy came out readable with a few errors, some of which were the reader's own stumbles).
+- **Phonon-2** ships as `phonon-2.bps.tar.zst` (164 MB: `model.fermion`, `config.json` with the vocabulary,
+  manifests). `model.fermion` is a packed container (five-value + int6 quantisation, ~2 bits per encoder weight).
+- **Engine (since 2026-10-01): Fermion's own CPU engine from the `fermion-research` PyPI package**, loaded straight from
+  `model/` by `fermion._speech.engine_phonon2_cpu.load` (see `_load_fermion` in the daemon). On Linux x86-64 it uses
+  a packed int8 encoder + a C TDT decode loop from the package's bundled `.so` (tier chosen from the CPU: AVX2 here;
+  AVX-512 VNNI / AMX parts are faster). First load unpacks the encoder planes into `model/cpu_planes_v1.bin` (304 MB,
+  ~30 s once), later loads take ~6-10 s. **Measured on this laptop (i5-10210U, 4 threads):** 1.5 GB resident (the
+  fp32 path: 2.9 GB), 11-12x realtime (fp32: 8-10x), transcripts identical on two clips. Their 46x-157x figures are
+  for AVX-512 Zen 5 machines; here it is a memory/disk win, not a latency win.
+- **Our earlier claim was wrong:** this file used to say the packed runtime was Apple-silicon only and that we had to
+  expand to fp32. The package docstring (`engine_phonon2_cpu.py` header) still describes the older fp32-only tier, which
+  is what misled us; the code below it (`mode = FERMION_P2_CPU or "onedot"`) picks the packed engine. `FERMION_P2_CPU=fp32`
+  forces the dense path.
+- **Gotcha: do not put `vendor/` on `sys.path` before importing `fermion`.** The package refuses to load if a flat module
+  called `fermion_container` is already bound to a different file (ImportError, which the daemon then reports and
+  survives by falling back). The vendored reader is therefore imported lazily inside the fallback only.
+- **Fallback: `PHONON_ENGINE=hf`** (also used automatically if the Fermion engine fails to load) is the earlier
+  implementation: `vendor/fermion_container.py` expands the container to fp32 and loads it into stock Hugging Face
+  `ParakeetForTDT`, cached as `hf/` (2.4 GB safetensors, built on first use, ~30 s; ~5 s afterwards), ~3 GB resident,
+  ~7x realtime. Verified word-for-word identical before/after that cache. Do not build that model on the `meta` device:
+  `load_state_dict(..., assign=True)` leaves the non-persistent positional buffers on meta ("cannot copy out of meta
+  tensor"); build on CPU, then assign. Naive building held ~6.8 GB; `assign=True`, deleting raw tensors and `malloc_trim` fixed it.
+- **Threads:** the daemon passes `PHONON_THREADS` (4) as `FERMION_CPU_THREADS` (the engine's own default here would be 8,
+  one per logical CPU) so the desktop keeps some CPU.
+- Their quoted 5.21 % average WER on English leaderboards is *their* number; we only spot-checked.
 - **English only.** One issue report shows 77 % WER on Catalan.
-- Decoding is greedy TDT via `model.generate`. Each phrase is decoded in isolation (no context carried over), which is
-  why every phrase gets a capital and a full stop. Cleaning that up (lowercase/strip the period when the next phrase
-  continues the sentence) is an open idea.
+- Decoding is greedy TDT. Each phrase is decoded in isolation (no context carried over), which is why every phrase gets a
+  capital and a full stop. Cleaning that up (lowercase/strip the period when the next phrase continues the sentence) is
+  an open idea.
 
 ## 3. Segmenting and the CPU cost of listening
 
